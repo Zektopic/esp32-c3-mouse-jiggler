@@ -547,6 +547,38 @@ void ble_hid_task_shut_down(void)
     }
 }
 
+#if CONFIG_BT_BLE_ENABLED && !CONFIG_BT_NIMBLE_ENABLED
+// When a bond exists, send directed advertisements to the bonded peer so
+// Windows auto-reconnects reliably after any restart (laptop or device).
+// Without this, Windows uses undirected scan and often times out, removing
+// the bond and forcing the user to re-pair manually every session.
+static void start_ble_advertising(void)
+{
+    int bond_num = esp_ble_get_bond_device_num();
+    if (bond_num > 0) {
+        esp_ble_bond_dev_t *bond_list = malloc(sizeof(esp_ble_bond_dev_t) * bond_num);
+        if (bond_list) {
+            esp_ble_get_bond_device_list(&bond_num, bond_list);
+            esp_ble_adv_params_t params = {
+                .adv_int_min       = 0x20,
+                .adv_int_max       = 0x40,
+                .adv_type          = ADV_TYPE_DIRECT_IND_LOW,
+                .own_addr_type     = BLE_ADDR_TYPE_PUBLIC,
+                .peer_addr_type    = BLE_ADDR_TYPE_PUBLIC,
+                .channel_map       = ADV_CHNL_ALL,
+                .adv_filter_policy = ADV_FILTER_ALLOW_SCAN_ANY_CON_ANY,
+            };
+            memcpy(params.peer_addr, bond_list[0].bd_addr, sizeof(esp_bd_addr_t));
+            free(bond_list);
+            esp_ble_gap_start_advertising(&params);
+            return;
+        }
+    }
+    // No bond yet — use normal undirected advertising for initial pairing
+    esp_hid_ble_gap_adv_start();
+}
+#endif
+
 static void ble_hidd_event_callback(void *handler_args, esp_event_base_t base, int32_t id, void *event_data)
 {
     esp_hidd_event_t event = (esp_hidd_event_t)id;
@@ -556,7 +588,11 @@ static void ble_hidd_event_callback(void *handler_args, esp_event_base_t base, i
     switch (event) {
     case ESP_HIDD_START_EVENT: {
         ESP_LOGI(TAG, "START");
+#if CONFIG_BT_BLE_ENABLED && !CONFIG_BT_NIMBLE_ENABLED
+        start_ble_advertising();
+#else
         esp_hid_ble_gap_adv_start();
+#endif
         break;
     }
     case ESP_HIDD_CONNECT_EVENT: {
@@ -593,7 +629,11 @@ static void ble_hidd_event_callback(void *handler_args, esp_event_base_t base, i
     case ESP_HIDD_DISCONNECT_EVENT: {
         ESP_LOGI(TAG, "DISCONNECT: %s", esp_hid_disconnect_reason_str(esp_hidd_dev_transport_get(param->disconnect.dev), param->disconnect.reason));
         ble_hid_task_shut_down();
+#if CONFIG_BT_BLE_ENABLED && !CONFIG_BT_NIMBLE_ENABLED
+        start_ble_advertising();
+#else
         esp_hid_ble_gap_adv_start();
+#endif
         break;
     }
     case ESP_HIDD_STOP_EVENT: {

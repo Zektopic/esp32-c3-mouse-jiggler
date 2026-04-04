@@ -8,6 +8,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <inttypes.h>
+#include <math.h>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -161,12 +162,43 @@ void ble_hid_demo_task_mouse(void *pvParameters)
 {
     // Wait for host to finish service discovery and enable HID notifications (CCCD)
     vTaskDelay(pdMS_TO_TICKS(3000));
-    // Mouse jiggler: random large movement every 2 seconds
+
+    // Mouse jiggler: human-like movement with ease-in / ease-out via sine curve
+    const int   steps    = 30;   // micro-steps per movement
+    const int   step_ms  = 16;   // ~60 fps feel per step
+    const int   pause_ms = 2000 - steps * step_ms; // rest of the 2s cycle
+
+    float weights[30];
+    float weight_sum = 0.0f;
+    for (int i = 0; i < steps; i++) {
+        float t = (float)(i + 1) / (steps + 1); // 0 < t < 1, avoids dead endpoints
+        weights[i] = sinf(3.14159265f * t);      // bell curve: slow-fast-slow
+        weight_sum += weights[i];
+    }
+
     while (1) {
-        int8_t dx = (int8_t)((rand() % 201) - 100); // -100 to +100
-        int8_t dy = (int8_t)((rand() % 201) - 100); // -100 to +100
-        send_mouse(0, dx, dy, 0);
-        vTaskDelay(pdMS_TO_TICKS(2000));
+        int total_dx = (rand() % 201) - 100; // -100 to +100 pixels
+        int total_dy = (rand() % 201) - 100;
+
+        int sent_dx = 0, sent_dy = 0;
+        for (int i = 0; i < steps; i++) {
+            int8_t dx, dy;
+            if (i == steps - 1) {
+                // Final step: send exact remainder to correct rounding drift
+                int rx = total_dx - sent_dx;
+                int ry = total_dy - sent_dy;
+                dx = (int8_t)(rx > 127 ? 127 : (rx < -127 ? -127 : rx));
+                dy = (int8_t)(ry > 127 ? 127 : (ry < -127 ? -127 : ry));
+            } else {
+                dx = (int8_t)roundf(weights[i] / weight_sum * (float)total_dx);
+                dy = (int8_t)roundf(weights[i] / weight_sum * (float)total_dy);
+            }
+            sent_dx += dx;
+            sent_dy += dy;
+            send_mouse(0, dx, dy, 0);
+            vTaskDelay(pdMS_TO_TICKS(step_ms));
+        }
+        vTaskDelay(pdMS_TO_TICKS(pause_ms));
     }
 }
 
@@ -642,18 +674,47 @@ void send_mouse(uint8_t buttons, char dx, char dy, char wheel)
 
 void bt_hid_demo_task(void *pvParameters)
 {
-    // Mouse jiggler: random large movement every 2 seconds
+    // Mouse jiggler: human-like movement with ease-in / ease-out via sine curve
+    const int   steps    = 30;
+    const int   step_ms  = 16;
+    const int   pause_ms = 2000 - steps * step_ms;
+
+    float weights[30];
+    float weight_sum = 0.0f;
+    for (int i = 0; i < steps; i++) {
+        float t = (float)(i + 1) / (steps + 1);
+        weights[i] = sinf(3.14159265f * t);
+        weight_sum += weights[i];
+    }
+
     while (1) {
-        int8_t dx = (int8_t)((rand() % 201) - 100); // -100 to +100
-        int8_t dy = (int8_t)((rand() % 201) - 100); // -100 to +100
-        send_mouse(0, dx, dy, 0);
-        vTaskDelay(pdMS_TO_TICKS(2000));
+        int total_dx = (rand() % 201) - 100;
+        int total_dy = (rand() % 201) - 100;
+
+        int sent_dx = 0, sent_dy = 0;
+        for (int i = 0; i < steps; i++) {
+            int8_t dx, dy;
+            if (i == steps - 1) {
+                int rx = total_dx - sent_dx;
+                int ry = total_dy - sent_dy;
+                dx = (int8_t)(rx > 127 ? 127 : (rx < -127 ? -127 : rx));
+                dy = (int8_t)(ry > 127 ? 127 : (ry < -127 ? -127 : ry));
+            } else {
+                dx = (int8_t)roundf(weights[i] / weight_sum * (float)total_dx);
+                dy = (int8_t)roundf(weights[i] / weight_sum * (float)total_dy);
+            }
+            sent_dx += dx;
+            sent_dy += dy;
+            send_mouse(0, dx, dy, 0);
+            vTaskDelay(pdMS_TO_TICKS(step_ms));
+        }
+        vTaskDelay(pdMS_TO_TICKS(pause_ms));
     }
 }
 
 void bt_hid_task_start_up(void)
 {
-    xTaskCreate(bt_hid_demo_task, "bt_hid_demo_task", 2 * 1024, NULL, configMAX_PRIORITIES - 3, &s_bt_hid_param.task_hdl);
+    xTaskCreate(bt_hid_demo_task, "bt_hid_demo_task", 3 * 1024, NULL, configMAX_PRIORITIES - 3, &s_bt_hid_param.task_hdl);
     return;
 }
 

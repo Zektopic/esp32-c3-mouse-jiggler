@@ -17,6 +17,7 @@
 #include "esp_event.h"
 #include "esp_log.h"
 #include "nvs_flash.h"
+#include "nvs.h"
 #include "esp_bt.h"
 
 #if CONFIG_BT_NIMBLE_ENABLED
@@ -158,6 +159,8 @@ void send_mouse(uint8_t buttons, char dx, char dy, char wheel)
 
 void ble_hid_demo_task_mouse(void *pvParameters)
 {
+    // Wait for host to finish service discovery and enable HID notifications (CCCD)
+    vTaskDelay(pdMS_TO_TICKS(3000));
     // Mouse jiggler: random large movement every 2 seconds
     while (1) {
         int8_t dx = (int8_t)((rand() % 201) - 100); // -100 to +100
@@ -526,6 +529,7 @@ static void ble_hidd_event_callback(void *handler_args, esp_event_base_t base, i
     }
     case ESP_HIDD_CONNECT_EVENT: {
         ESP_LOGI(TAG, "CONNECT");
+        ble_hid_task_start_up();
         break;
     }
     case ESP_HIDD_PROTOCOL_MODE_EVENT: {
@@ -792,9 +796,42 @@ void app_main(void)
     }
     ESP_ERROR_CHECK( ret );
 
+    // Detect first boot after firmware update — bonds must be cleared so the host
+    // re-enables HID notifications (CCCD) for the new mouse service.
+    bool clear_ble_bonds = false;
+    {
+        nvs_handle_t nvs_h;
+        if (nvs_open("zektopic", NVS_READWRITE, &nvs_h) == ESP_OK) {
+            uint8_t ver = 0;
+            if (nvs_get_u8(nvs_h, "hid_ver", &ver) != ESP_OK || ver != 1) {
+                clear_ble_bonds = true;
+                nvs_set_u8(nvs_h, "hid_ver", 1);
+                nvs_commit(nvs_h);
+            }
+            nvs_close(nvs_h);
+        }
+    }
+
     ESP_LOGI(TAG, "setting hid gap, mode:%d", HID_DEV_MODE);
     ret = esp_hid_gap_init(HID_DEV_MODE);
     ESP_ERROR_CHECK( ret );
+
+#if CONFIG_BT_BLE_ENABLED && !CONFIG_BT_NIMBLE_ENABLED
+    if (clear_ble_bonds) {
+        int bond_num = esp_ble_get_bond_device_num();
+        if (bond_num > 0) {
+            esp_ble_bond_dev_t *bond_list = malloc(sizeof(esp_ble_bond_dev_t) * bond_num);
+            if (bond_list) {
+                esp_ble_get_bond_device_list(&bond_num, bond_list);
+                for (int i = 0; i < bond_num; i++) {
+                    esp_ble_remove_bond_device(bond_list[i].bd_addr);
+                }
+                free(bond_list);
+                ESP_LOGI(TAG, "Cleared %d stale BLE bond(s) — re-pair required once", bond_num);
+            }
+        }
+    }
+#endif
 
 #if CONFIG_BT_BLE_ENABLED || CONFIG_BT_NIMBLE_ENABLED
     ret = esp_hid_ble_gap_adv_init(ESP_HID_APPEARANCE_MOUSE, ble_hid_config.device_name);
